@@ -181,6 +181,20 @@ float getMipLevel(float kernelSize) {
     return mip;
 }
 
+void initRing(float i, float kernelSize,
+        out float radius, out float count, out vec4 r, out vec2 p) {
+    radius = (kernelSize / RING_COUNT) * i;
+    count = max(1.0, RING_DENSITY * i);
+
+    float inc = 2.0 * PI / count;
+    vec2 t = vec2(cos(inc), sin(inc));
+    float firstSamplePosition = mod(i, 2.0) * 0.5 * inc;
+
+    r = vec4(t.x, -t.y, t.y, t.x);
+    p = radius * vec2(cos(firstSamplePosition), sin(firstSamplePosition));
+}
+
+
 void postProcess(inout PostProcessInputs postProcess) {
     highp vec2 uv = variable_vertex.xy;
     vec2 tiles = textureLod(materialParams_tiles, uv, 0.0).rg;
@@ -218,13 +232,13 @@ void postProcess(inout PostProcessInputs postProcess) {
         vec2 uvCenter = uv + noise * kernelSize * fullResPixelSize;
 
         for (float i = 0.0; i < RING_COUNT; i += 1.0) {
-            float radius = (kernelSize / RING_COUNT) * i;
-            float count = max(1.0, RING_DENSITY * i);
-            float inc = 2.0 * PI / count;
-            vec2 t = vec2(cos(inc), sin(inc));
-            vec4 r = vec4(t.x, -t.y, t.y, t.x);
-            float firstSamplePosition = mod(i, 2.0) * 0.5 * inc;
-            vec2 p = radius * vec2(cos(firstSamplePosition), sin(firstSamplePosition));
+
+            float radius, count;
+            vec2 p;
+            vec4 r;
+
+            initRing(i, kernelSize, radius, count, r, p);
+
             for (float j = 0.0; j < count; j += 1.0) {
                 vec2 pos = uvCenter + p * fullResPixelSize;
                 vec4 s = textureLod(materialParams_foreground, pos, mip);
@@ -262,13 +276,13 @@ void postProcess(inout PostProcessInputs postProcess) {
         accumulateForegroundFirst(foreground, fgOpacity, c, uvCenter, 0.0, mip);
 
         for (float i = 1.0; i < RING_COUNT; i += 1.0) {
-            float radius = (kernelSize / RING_COUNT) * i;
-            float count = max(1.0, RING_DENSITY * i);
-            float inc = 2.0 * PI / count;
-            vec2 t = vec2(cos(inc), sin(inc));
-            vec4 r = vec4(t.x, -t.y, t.y, t.x);
-            float firstSamplePosition = mod(i, 2.0) * 0.5 * inc;
-            vec2 p = radius * vec2(cos(firstSamplePosition), sin(firstSamplePosition));
+
+            float radius, count;
+            vec2 p;
+            vec4 r;
+
+            initRing(i, kernelSize, radius, count, r, p);
+
             for (float j = 0.0; j < count; j += 2.0) {
                 accumulateForegroundMirror(foreground, fgOpacity, c,
                         uvCenter, p * fullResPixelSize, radius, mip);
@@ -293,13 +307,13 @@ void postProcess(inout PostProcessInputs postProcess) {
         accumulateBackgroundFirst(background, bgOpacity, c, uvCenter, 0.0, mip);
 
         for (float i = 1.0; i < RING_COUNT; i += 1.0) {
-            float radius = (kernelSize / RING_COUNT) * i;
-            float count = max(1.0, RING_DENSITY * i);
-            float inc = 2.0 * PI / count;
-            vec2 t = vec2(cos(inc), sin(inc));
-            vec4 r = vec4(t.x, -t.y, t.y, t.x);
-            float firstSamplePosition = mod(i, 2.0) * 0.5 * inc;
-            vec2 p = radius * vec2(cos(firstSamplePosition), sin(firstSamplePosition));
+
+            float radius, count;
+            vec2 p;
+            vec4 r;
+
+            initRing(i, kernelSize, radius, count, r, p);
+
             for (float j = 0.0; j < count; j += 2.0) {
                 accumulateBackgroundMirror(background, bgOpacity, c,
                         uvCenter, p * fullResPixelSize, radius, mip);
