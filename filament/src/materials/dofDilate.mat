@@ -41,10 +41,16 @@ vec2 dilate(inout vec2 center, vec2 tap) {
 
     // Tiles that can affect us need to transfer their CoC to us (for the foreground it's
     // min(ourCoc, theirCoc) because CoC are negative (the min is the larger radius).
-    // However, if their CoC is very large, we can limit it by the distance to that
+
+    // TODO: However, if their CoC is very large, we can limit it by the distance to that
     // tile, because we only need to reach *them*).
-    center.g = min(center.g, max(tap.g, maxDistance));
-    center.r = max(center.r, min(tap.r, maxDistance));
+    // The difficuty here is the this clamping depends on if we're negative or positive.
+    // e.g. for positive values
+    //    center.g = min(center.g, max(tap.g, maxDistance));
+    //    center.r = max(center.r, max(tap.r, maxDistance));
+
+    center.g = min(center.g, tap.g);
+    center.r = max(center.r, tap.r);
     return center;
 }
 
