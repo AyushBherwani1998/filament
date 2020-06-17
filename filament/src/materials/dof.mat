@@ -20,6 +20,10 @@ material {
            type : sampler2d,
            name : tiles,
            precision: medium
+        },
+        {
+           type : float,
+           name : bokehAngle,
         }
     ],
     variables : [
@@ -41,9 +45,9 @@ fragment {
 #include "dofUtils.fs"
 
 
-#define RING_DENSITY 6.0
-#define RING_COUNT	 4.0
-#define SAMPLE_COUNT ((RING_DENSITY * RING_COUNT * (RING_COUNT - 1.0) + 2.0) * 0.5)
+#define RING_DENSITY    6.0
+#define RING_COUNT	    4.0
+#define SAMPLE_COUNT    ((RING_DENSITY * RING_COUNT * (RING_COUNT - 1.0) + 2.0) * 0.5)
 
 void dummy(){}
 

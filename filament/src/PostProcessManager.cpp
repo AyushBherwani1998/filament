@@ -701,6 +701,12 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
     auto depth = blackboard.get<FrameGraphTexture>("depth");
     assert(depth.isValid());
 
+    auto const& inputDesc = fg.getDescriptor(input);
+    const uint32_t width  = (inputDesc.width  + 1) / 2;
+    const uint32_t height = (inputDesc.height + 1) / 2;
+    const uint8_t maxLevelCount = FTexture::maxLevelCount(width, height);
+    uint8_t mipmapCount = min(maxLevelCount, uint8_t(4));
+
     /*
      * Setup:
      *      - Downsample of color buffer
@@ -722,23 +728,22 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
                 data.color = builder.sample(input);
                 data.depth = builder.sample(depth);
 
-                auto const& inputDesc = fg.getDescriptor(input);
                 data.outForeground = builder.createTexture("dof foreground output", {
-                        .width  = inputDesc.width / 2,
-                        .height = inputDesc.height / 2,
-                        .levels = 4,
+                        .width  = width,
+                        .height = height,
+                        .levels = mipmapCount,
                         .format = format
                 });
                 data.outBackground = builder.createTexture("dof background output", {
-                        .width  = inputDesc.width / 2,
-                        .height = inputDesc.height / 2,
-                        .levels = 4,
+                        .width  = width,
+                        .height = height,
+                        .levels = mipmapCount,
                         .format = format
                 });
                 data.outCocFgBg = builder.createTexture("dof CoC output", {
-                        .width  = inputDesc.width / 2,
-                        .height = inputDesc.height / 2,
-                        .levels = 4,
+                        .width  = width,
+                        .height = height,
+                        .levels = mipmapCount,
                         .format = TextureFormat::RG16F
                 });
                 data.outForeground = builder.write(data.outForeground);
@@ -780,6 +785,9 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
         FrameGraphRenderTargetHandle rt[3];
     };
 
+    assert(mipmapCount - 1
+           <= sizeof(PostProcessDofMipmap::rt) / sizeof(FrameGraphRenderTargetHandle));
+
     auto& ppDoFMipmap = fg.addPass<PostProcessDofMipmap>("DoF Mipmap",
             [&](FrameGraph::Builder& builder, auto& data) {
                 data.inOutForeground = builder.sample(ppDoFDownsample.getData().outForeground);
@@ -788,7 +796,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
                 data.inOutForeground = builder.write(data.inOutForeground);
                 data.inOutBackground = builder.write(data.inOutBackground);
                 data.inOutCocFgBg    = builder.write(data.inOutCocFgBg);
-                for (size_t i = 0; i < 3; i++) {
+                for (size_t i = 0; i < mipmapCount - 1u; i++) {
                     using Attachment = FrameGraphRenderTarget::Attachments::AttachmentInfo;
                     data.rt[i] = builder.createRenderTarget("DoF Target", {
                             .attachments = {
@@ -817,7 +825,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
                 mi->setParameter("cocFgBg",    inOutCocFgBg,    {});
                 mi->use(driver);
 
-                for (size_t level = 0 ; level < 3 ; level++) {
+                for (size_t level = 0 ; level < mipmapCount - 1u ; level++) {
                     auto const& out = resources.get(data.rt[level]);
                     mi->setParameter("mip", uint32_t(level));
                     mi->setParameter("weightScale", 0.5f / float(1u<<level));
@@ -836,20 +844,26 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
 
     auto inTilesCocMaxMin = ppDoFDownsample.getData().outCocFgBg;
 
+    // Match this with TILE_SIZE in dofDilate.mat
+    const size_t tileSize = 32; // size of the tile in full resolution pixel
+    size_t tileReductionCount = std::log2(tileSize) - 1.0; // -1 because we start from half-resolution
+    tileReductionCount = min(tileReductionCount,
+            (size_t)FTexture::maxLevelCount((width + 1) / 2, (height + 1) / 2));
+
     struct PostProcessDofTiling1 {
         FrameGraphId<FrameGraphTexture> inCocMaxMin;
         FrameGraphId<FrameGraphTexture> outTilesCocMaxMin;
         FrameGraphRenderTargetHandle rt;
     };
 
-    for (size_t i = 0; i < 4; i++) {
-        auto& ppDoFTiling = fg.addPass<PostProcessDofTiling1>("DoF Tiling 1",
+    for (size_t i = 0; i < tileReductionCount; i++) {
+        auto& ppDoFTiling = fg.addPass<PostProcessDofTiling1>("DoF Tiling",
                 [&](FrameGraph::Builder& builder, auto& data) {
                     auto const& inputDesc = fg.getDescriptor(inTilesCocMaxMin);
                     data.inCocMaxMin = builder.sample(inTilesCocMaxMin);
                     data.outTilesCocMaxMin = builder.createTexture("dof tiles output", {
-                            .width  = inputDesc.width / 2,
-                            .height = inputDesc.height / 2,
+                            .width  = (inputDesc.width + 1) / 2,
+                            .height = (inputDesc.height+ 1) / 2,
                             .format = TextureFormat::RG16F
                     });
                     data.outTilesCocMaxMin = builder.write(data.outTilesCocMaxMin);
@@ -961,6 +975,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::dof(FrameGraph& fg,
                 mi->setParameter("background",  background,     { .filterMin = SamplerMinFilter::LINEAR_MIPMAP_LINEAR });
                 mi->setParameter("cocFgBg",     cocFgBg,        { .filterMin = SamplerMinFilter::LINEAR_MIPMAP_LINEAR });
                 mi->setParameter("tiles",       tilesCocMaxMin, { .filterMin = SamplerMinFilter::NEAREST });
+                mi->setParameter("bokehAngle",  bokehAngle);
                 mi->commit(driver);
                 mi->use(driver);
                 PipelineState pipeline(material.getPipelineState(variant));
