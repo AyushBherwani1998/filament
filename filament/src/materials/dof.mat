@@ -54,19 +54,41 @@ fragment {
 #define RING_COUNT	    4.0
 #define SAMPLE_COUNT    ((RING_DENSITY * RING_COUNT * (RING_COUNT - 1.0) + 2.0) * 0.5)
 
+// Enabled by default. Mipmaped taps look a lot better, but do cause some
+// aliasing issues which force us to set all sample weights to 1.0
+// This is here mostly for debugging.
+#define KERNEL_USE_MIPMAP     1
+
+// Experimentally, adding spacial noise is not necessary if KERNEL_USE_MIPMAP is enabled,
+// however, noise helps a lot otherwise.
+// This is here mostly for debugging.
+#define KERNEL_USE_NOISE      0
+
+
 void dummy(){}
 
 layout(location = 1) out float outAlpha;
 
-
-float sampleWeight(float coc) {
+float sampleWeight(float coc, float mip) {
+#if KERNEL_USE_MIPMAP
+    // When mipmaping is used this creates aliasing artifacts around geometry edges.
+    // Applying the mip correction factor (as below) helps but doesn't solve the issue.
+    // In the end, it's better to just assume equal strength for all samples.
+    return 1.0;
+#else
     // The contribution of sample is inversely proportional to *it's* area
     // (the larger area, the fainter it is).
     // In theory this factor should be 1 / pi * radius^2, however 1/pi is a constant, and
     // because we divide by the total weight eventually, it can be ommited, in fact, any
     // constant can be used. Here we use MAX_COC_RADIUS * MAX_COC_RADIUS instead of 1/pi,
     // because this allows us to fit in mediump precision.
-    return (MAX_COC_RADIUS * MAX_COC_RADIUS) / (max(coc * coc, 0.5));
+
+    // The high resolution pixel radius is sqrt(2) * 0.5.
+    // x2 to scale to 1/4 res, x 2^mip for the current mip.
+    // ^2 for the area.
+    float pixelRadiusSquared = pow(2.0, mip);
+    return (MAX_COC_RADIUS * MAX_COC_RADIUS) / (max(coc * coc, pixelRadiusSquared));
+#endif
 }
 
 float intersection(float border, float absCoc, float mip) {
@@ -83,107 +105,85 @@ float rcp(float x) {
 }
 
 /*
- * We use the accumulation method described in
- * "Bokeh depth of field in a single pass" by Dennis Gustafsson
- * [http://blog.tuxedolabs.com/2018/05/04/bokeh-depth-of-field-in-single-pass.html]
- *
- * We initialize the accumulator with the center value and our initial total weight starts at 1.0.
- * Then, each time a new sample does not intersect with the center (meaning it doesn't contribute
- * to this fragment), we scale the current accumulation to a weight of 'i + 1'.
- * Samples that do contribute are simply acumulated, also increasing the total weight by 1.
- * At the end of the process we're guaranteed to have a total weight of SAMPLE_COUNT + 1.
- * The scale factor at each "miss" step is simply (i + 1) / i.
- * With this technique the weight of each sample is constant; in reality it should depend on
- * the circle-of-confusion area.
+ * We use a lot of techniques described in:
+ * "Life of a Bokeh" by Guillaume Abadie, SIGGRAPH 2018
  */
 
 void accumulateBackground(inout vec4 background, inout float opacity,
-        inout float i, highp vec2 pos, float radius, float mip) {
+        inout float i, highp vec2 pos, float border, float mip) {
     float coc = textureLod(materialParams_cocFgBg, pos, mip).g;
     vec4 s = textureLod(materialParams_background, pos, mip);
-    float o = cocToAlpha(coc);
-    float w = intersection(radius, abs(coc), mip) * isBackground(coc);
-    float ii = rcp(i);
-    background += mix(background * ii, s, w);
-    opacity += mix(opacity * ii, o, w);
-    i += 1.0;
-    //w *= sampleWeight(coc);
-    //background += s * w;
-    //opacity += o * w;
-    //i += w;
+    float inLayer = isBackground(coc);
+    float o = cocToAlpha(coc) * inLayer;
+    float w = intersection(border, abs(coc), mip) * sampleWeight(coc, mip) * inLayer;
+    background += s * w;
+    opacity += o;
+    i += w;
 }
 
 void accumulateForeground(inout vec4 foreground, inout float opacity, inout float i,
-        highp vec2 pos, float radius, float mip) {
+        highp vec2 pos, float border, float mip) {
     float coc = textureLod(materialParams_cocFgBg, pos, mip).r;
     vec4 s = textureLod(materialParams_foreground, pos, mip);
-    float o = cocToAlpha(coc);
-    float w = intersection(radius, abs(coc), mip) * isForeground(coc);
-    float ii = rcp(i);
-    foreground += mix(foreground * ii, s, w);
-    opacity += mix(opacity * ii, o, w);
-    i += 1.0;
-    //w *= sampleWeight(coc);
-    //foreground += s * w;
-    //opacity += o * w;
-    //i += w;
+    float inLayer = isForeground(coc);
+    float o = cocToAlpha(coc) * inLayer;
+    float w = intersection(border, abs(coc), mip) * sampleWeight(coc, mip) * inLayer;
+    foreground += s * w;
+    opacity += o;
+    i += w;
 }
 
-void accumulateBackgroundFirst(inout vec4 background, inout float opacity, inout float i,
-        highp vec2 pos, float radius, float mip) {
-    float coc = textureLod(materialParams_cocFgBg, pos, mip).g;
-    background = textureLod(materialParams_background, pos, mip);
-    opacity = cocToAlpha(coc);
-    i += 1.0;
+void accumulateBackgroundCenter(inout vec4 background, inout float opacity, inout float i,
+        highp vec2 pos, float border, float mip) {
+    accumulateBackground(background, opacity, i,pos, border, mip);
 }
 
-void accumulateForegroundFirst(inout vec4 foreground, inout float opacity, inout float i,
-        highp vec2 pos, float radius, float mip) {
-    float coc = textureLod(materialParams_cocFgBg, pos, mip).r;
-    foreground = textureLod(materialParams_foreground, pos, mip);
-    opacity = cocToAlpha(coc);
-    i += 1.0;
+void accumulateForegroundCenter(inout vec4 foreground, inout float opacity, inout float i,
+        highp vec2 pos, float border, float mip) {
+    accumulateForeground(foreground, opacity, i,pos, border, mip);
 }
 
 void accumulateBackgroundMirror(inout vec4 background, inout float opacity, inout float i,
-        highp vec2 center, vec2 offset, float radius, float mip) {
-    accumulateBackground(background, opacity, i, center + offset, radius, mip);
-    accumulateBackground(background, opacity, i, center - offset, radius, mip);
+highp vec2 center, vec2 offset, float border, float mip) {
+    accumulateBackground(background, opacity, i, center + offset, border, mip);
+    accumulateBackground(background, opacity, i, center - offset, border, mip);
 }
 
 void accumulateForegroundMirror(inout vec4 foreground, inout float opacity, inout float i,
-        highp vec2 center, vec2 offset, float radius, float mip) {
+        highp vec2 center, vec2 offset, float border, float mip) {
     // The code below is equivalent to:
-    //      accumulateForeground(foreground, opacity, i, center + offset, radius, mip);
-    //      accumulateForeground(foreground, opacity, i, center - offset, radius, mip);
+    //      accumulateForeground(foreground, opacity, i, center + offset, border, mip);
+    //      accumulateForeground(foreground, opacity, i, center - offset, border, mip);
     // but selects the min coc of opposite samples as a way to guess the color occluded by
     // the geometry.
-    
+
     float coc0 = textureLod(materialParams_cocFgBg, center + offset, mip).r;
-    float coc1 = textureLod(materialParams_cocFgBg, center - offset, mip).r;
-    float coc = min(coc0, coc1);
     vec4 s0 = textureLod(materialParams_foreground, center + offset, mip);
+    float coc1 = textureLod(materialParams_cocFgBg, center - offset, mip).r;
     vec4 s1 = textureLod(materialParams_foreground, center - offset, mip);
-    float o = cocToAlpha(coc);
-    float w = intersection(radius, abs(coc), mip) * isForeground(coc);
-    float ii = rcp(i);
-    foreground += mix(foreground * ii, s0, w);
-    opacity += mix(opacity * ii, o, w);
-    i += 1.0;
-    ii = rcp(i);
-    foreground += mix(foreground * ii, s1, w);
-    opacity += mix(opacity * ii, o, w);
-    i += 1.0;
+    float coc = min(coc0, coc1);
+    float inLayer = isForeground(coc);
+    float o = cocToAlpha(coc) * inLayer * 2.0;  // we're accumulating 2 samples
+    float w = intersection(border, abs(coc), mip) * sampleWeight(coc, mip) * inLayer;
+    foreground += s0 * w;
+    foreground += s1 * w;
+    opacity += o;
+    i += w * 2.0;
 }
 
 float getMipLevel(float kernelSize) {
+#if KERNEL_USE_MIPMAP
     float mip = log2(kernelSize * rcp(RING_COUNT + 0.5));
     return mip;
+#else
+    return 1.0;
+#endif
 }
 
 void initRing(float i, float kernelSize,
-        out float radius, out float count, out vec4 r, out vec2 p) {
-    radius = (kernelSize / RING_COUNT) * i;
+        out float border, out float count, out vec4 r, out vec2 p) {
+    float radius = (kernelSize / RING_COUNT) * i;
+    border = radius;
     count = max(1.0, RING_DENSITY * i);
 
     float inc = 2.0 * PI / count;
@@ -211,18 +211,19 @@ void postProcess(inout PostProcessInputs postProcess) {
 
     vec4 foreground = vec4(0.0);
     vec4 background = vec4(0.0);
-    float fgOpacity = 0.0;
-    float bgOpacity = 0.0;
 
     // we use the full resolution pixel size because that's the unit the CoC is in
     highp vec2 fullResPixelSize = 0.5 / vec2(textureSize(materialParams_foreground, 0));
 
+#if KERNEL_USE_NOISE
     // When using mipmaping the noise seems to hurt more than it helps
-    //float randomAngle = random(gl_FragCoord.xy) * (2.0 * PI);
-    //float random01 = random(gl_FragCoord.xy * vec2(7.0, 11.0));
-    //vec2  randomUniformDisk = 0.5 * sqrt(random01) * vec2(cos(randomAngle), sin(randomAngle));
-    //vec2  noise = randomUniformDisk * rcp(RING_COUNT + 0.5);
-    vec2 noise = vec2(0.0);
+    float randomAngle = random(gl_FragCoord.xy) * (2.0 * PI);
+    float random01 = random(gl_FragCoord.xy * vec2(7.0, 11.0));
+    vec2  randomUniformDisk = 0.5 * sqrt(random01) * vec2(cos(randomAngle), sin(randomAngle));
+    vec2  noise = randomUniformDisk * rcp(RING_COUNT + 0.5);
+#else
+    const vec2 noise = vec2(0.0);
+#endif
 
     if (isFastTile(tiles)) {
         // for a foreground tile, the kernel size is the largest CoC radius
@@ -233,37 +234,35 @@ void postProcess(inout PostProcessInputs postProcess) {
 
         for (float i = 0.0; i < RING_COUNT; i += 1.0) {
 
-            float radius, count;
+            float border, count;
             vec2 p;
             vec4 r;
 
-            initRing(i, kernelSize, radius, count, r, p);
+            initRing(i, kernelSize, border, count, r, p);
 
             for (float j = 0.0; j < count; j += 1.0) {
                 vec2 pos = uvCenter + p * fullResPixelSize;
-                vec4 s = textureLod(materialParams_foreground, pos, mip);
-                float o = cocToAlpha(coc);
-                foreground += s;
-                fgOpacity += o;
+                foreground += textureLod(materialParams_foreground, pos, mip);
                 p = vec2(dot(p, r.xy), dot(p, r.zw));
             }
         }
         foreground *= rcp(SAMPLE_COUNT);
-        fgOpacity  *= rcp(SAMPLE_COUNT);
-        foreground *= fgOpacity;
-        //foreground.b += 0.4;
+        //foreground.b += 0.1;
 #if POST_PROCESS_OPAQUE
         // kill the work performed above
         foreground.a = 0.0;
 #endif
         postProcess.color  = foreground;
-        outAlpha           = fgOpacity;
+        outAlpha           = 1.0;
         return;
     }
 
     /*
      * Then process the slow foreground / background tiles
      */
+
+    float fgOpacity = 0.0;
+    float bgOpacity = 0.0;
 
     if (isForegroundTile(tiles)) {
         // for a foreground tile, the kernel size is the largest CoC radius
@@ -273,26 +272,24 @@ void postProcess(inout PostProcessInputs postProcess) {
         float c = 0.0;
 
         // the center sample is handled separatly, since it's by itself
-        accumulateForegroundFirst(foreground, fgOpacity, c, uvCenter, 0.0, mip);
+        accumulateForegroundCenter(foreground, fgOpacity, c, uvCenter, 0.0, mip);
 
         for (float i = 1.0; i < RING_COUNT; i += 1.0) {
 
-            float radius, count;
+            float border, count;
             vec2 p;
             vec4 r;
 
-            initRing(i, kernelSize, radius, count, r, p);
+            initRing(i, kernelSize, border, count, r, p);
 
             for (float j = 0.0; j < count; j += 2.0) {
                 accumulateForegroundMirror(foreground, fgOpacity, c,
-                        uvCenter, p * fullResPixelSize, radius, mip);
+                        uvCenter, p * fullResPixelSize, border, mip);
                 p = vec2(dot(p, r.xy), dot(p, r.zw));
             }
         }
-        float ic = rcp(c);
-        foreground *= ic;
-        fgOpacity  *= ic;
-        foreground *= fgOpacity;
+        foreground *= c < MEDIUMP_FLT_MIN ? 0.0 : rcp(c);
+        fgOpacity  *= c < MEDIUMP_FLT_MIN ? 0.0 : rcp(SAMPLE_COUNT);
         //foreground.r += 0.1;
     }
 
@@ -304,26 +301,24 @@ void postProcess(inout PostProcessInputs postProcess) {
         float c = 0.0;
 
         // the center sample is handled separatly, since it's by itself
-        accumulateBackgroundFirst(background, bgOpacity, c, uvCenter, 0.0, mip);
+        accumulateBackgroundCenter(background, bgOpacity, c, uvCenter, 0.0, mip);
 
         for (float i = 1.0; i < RING_COUNT; i += 1.0) {
 
-            float radius, count;
+            float border, count;
             vec2 p;
             vec4 r;
 
-            initRing(i, kernelSize, radius, count, r, p);
+            initRing(i, kernelSize, border, count, r, p);
 
             for (float j = 0.0; j < count; j += 2.0) {
                 accumulateBackgroundMirror(background, bgOpacity, c,
-                        uvCenter, p * fullResPixelSize, radius, mip);
+                        uvCenter, p * fullResPixelSize, border, mip);
                 p = vec2(dot(p, r.xy), dot(p, r.zw));
             }
         }
-        float ic = rcp(c);
-        background *= ic;
-        bgOpacity  *= ic;
-        background *= bgOpacity;
+        background *= c < MEDIUMP_FLT_MIN ? 0.0 : rcp(c);
+        bgOpacity  *= c < MEDIUMP_FLT_MIN ? 0.0 : rcp(SAMPLE_COUNT);
         //background.g += 0.1;
     }
 
@@ -336,6 +331,9 @@ void postProcess(inout PostProcessInputs postProcess) {
     // composite the foreground and background layers together.
     // the downside of doing this is that we couldn't use a different upscaler for each
     // layer, but this is a lot less costly
+
+    foreground *= fgOpacity;
+    background *= bgOpacity;
     postProcess.color = foreground + (1.0 - fgOpacity) * background;
     outAlpha          = fgOpacity  + (1.0 - fgOpacity) * bgOpacity;
 }
